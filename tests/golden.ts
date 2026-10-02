@@ -17,6 +17,44 @@ export interface ProtocolGolden {
   device_id: number;
   bank_size: number;
   messages: Record<string, string | string[]>;
+  format_name: { input: string; stored?: string; error?: boolean }[];
+  param_limits: number[];
+}
+
+export interface EffectGolden {
+  id: number;
+  enabled: boolean;
+  params: number[];
+  extra: number;
+  origin: number | null;
+}
+
+export interface ParsedGolden {
+  name: string;
+  display_name: string;
+  version: number;
+  target: number;
+  reserved: string;
+  effect_ids: number[];
+  effects: EffectGolden[];
+  chunks: Record<string, string>;
+}
+
+// The edit operations of golden.py, applied in order before encoding.
+export type EditOp =
+  | { op: 'toggle'; index: number }
+  | { op: 'set_params'; index: number; params: number[] }
+  | { op: 'rename'; name: string }
+  | { op: 'reverse' }
+  | { op: 'remove'; index: number }
+  | { op: 'add'; effect: Omit<EffectGolden, 'origin'> };
+
+export interface EditGolden {
+  name: string;
+  ops: EditOp[];
+  preamp: (boolean | null)[] | null;
+  encoded: string;
+  reparsed: ParsedGolden;
 }
 
 export interface PatchGolden {
@@ -24,7 +62,10 @@ export interface PatchGolden {
   input: string;
   sha256: string;
   declared_length: number;
+  parsed: ParsedGolden;
   encoded: string;
+  roundtrip: boolean;
+  edits: EditGolden[];
   sysex: {
     patch_download: string;
     packed_8to7: string;

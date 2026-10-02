@@ -6,7 +6,35 @@
     <title>StompWhisperer</title>
   </head>
   <body>
-    <main id="app"></main>
+    <header class="topbar">
+      <h1 class="brand">Stomp<span>Whisperer</span></h1>
+      <div class="status" id="status" data-state="idle" role="status">
+        <span class="led" aria-hidden="true"></span>
+        <span id="status-text">Not connected</span>
+      </div>
+      <div class="actions">
+        <button type="button" id="connect">Connect pedal</button>
+        <button type="button" id="refresh" disabled title="Read the patches from the pedal again">
+          Read again
+        </button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="patch-list" aria-labelledby="list-title">
+        <h2 id="list-title">Patches</h2>
+        <p class="list-state" id="list-state">
+          Plug in your Zoom MS-50G+ via USB, power it on and press <strong>Connect pedal</strong>.
+          Nothing is ever written to the pedal from this page.
+        </p>
+        <ol class="slots" id="slots"></ol>
+      </aside>
+
+      <section class="patch-detail" id="detail" aria-live="polite">
+        <p class="detail-empty">Select a patch to see its effect chain.</p>
+      </section>
+    </main>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
