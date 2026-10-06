@@ -6,8 +6,9 @@
 
 import './style.css';
 
+import { backupFileName, backupToJson, createBackup, type Backup } from './backup';
 import { displayName, patchDescription, type Patch } from './patch';
-import { Pedal } from './pedal';
+import { type PatchInfo, Pedal } from './pedal';
 import { type SlotEntry, effectIdHex, isFactorySlot, toSlotEntry, usedEffects } from './slots';
 import { isPedalPort, openPedal, requestMidi } from './webmidi';
 
@@ -19,12 +20,15 @@ const statusBox = $('#status');
 const statusText = $('#status-text');
 const connectButton = $<HTMLButtonElement>('#connect');
 const refreshButton = $<HTMLButtonElement>('#refresh');
+const backupButton = $<HTMLButtonElement>('#backup');
 const listState = $('#list-state');
 const slotList = $('#slots');
 const detail = $('#detail');
 
 let pedal: Pedal | null = null;
 let entries: SlotEntry[] = [];
+// Every slot from the last complete read; null while reading or after a failed read.
+let lastBackup: Backup | null = null;
 let selected: number | null = null;
 let reading = false;
 
@@ -52,6 +56,7 @@ const messageOf = (error: unknown) => (error instanceof Error ? error.message : 
 function updateButtons(): void {
   connectButton.hidden = pedal !== null;
   refreshButton.disabled = pedal === null || reading;
+  backupButton.disabled = lastBackup === null || reading;
 }
 
 // ---------- connection ----------
@@ -95,16 +100,23 @@ async function readSlots(): Promise<void> {
   reading = true;
   updateButtons();
   entries = [];
+  lastBackup = null;
   slotList.replaceChildren();
   listState.hidden = false;
   listState.textContent = 'Reading patches…';
   try {
-    await pedal.readAllSlots((read, info) => {
+    // 'as': TypeScript can't see the callback assign it, and would narrow it to plain null.
+    let patchInfo = null as PatchInfo | null;
+    const reads = await pedal.readAllSlots((read, info) => {
+      patchInfo = info;
       const entry = toSlotEntry(read);
       entries.push(entry);
       slotList.append(slotItem(entry));
       listState.textContent = `Reading patch ${read.slot} of ${info.count}…`;
     });
+    if (patchInfo) {
+      lastBackup = createBackup(patchInfo, reads);
+    }
     listState.hidden = true;
     if (selected !== null) {
       showDetail(selected);
@@ -116,6 +128,24 @@ async function readSlots(): Promise<void> {
     reading = false;
     updateButtons();
   }
+}
+
+// ---------- backup ----------
+
+/** Save the last complete read as a JSON file through the browser's download. */
+function downloadBackup(): void {
+  if (!lastBackup) {
+    return;
+  }
+  // A web page can't write to the disk directly: it builds the file in memory (a Blob),
+  // points a temporary URL at it and clicks a link that downloads that URL.
+  const blob = new Blob([backupToJson(lastBackup)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = el('a');
+  link.href = url;
+  link.download = backupFileName(lastBackup.createdAt);
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 // ---------- rendering ----------
@@ -206,4 +236,5 @@ function patchBody(patch: Patch): Node[] {
 
 connectButton.addEventListener('click', () => void connect());
 refreshButton.addEventListener('click', () => void readSlots());
+backupButton.addEventListener('click', downloadBackup);
 updateButtons();

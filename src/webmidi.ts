@@ -30,6 +30,15 @@ export async function requestMidi(): Promise<MIDIAccess> {
         "MIDI access was blocked. Allow it for this site in the browser's settings and try again.",
       );
     }
+    // Chrome's message when it can't reach the system MIDI layer (on Linux: ALSA). Seen in
+    // the snap build of Chromium, whose sandbox doesn't expose ALSA.
+    if (error instanceof DOMException && error.message.includes('Platform dependent initialization failed')) {
+      throw new Error(
+        "The browser couldn't reach the system's MIDI devices. On Linux, sandboxed browser " +
+          'packages (such as the Chromium snap) may have no MIDI access: try a regular install of ' +
+          'Chrome or Chromium.',
+      );
+    }
     throw error;
   }
 }
