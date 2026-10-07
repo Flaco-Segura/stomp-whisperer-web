@@ -5,6 +5,7 @@
 // file, so here all slots go into a single JSON document with the bytes in base64.
 // A backup file comes back from the user's disk later, so parseBackup checks everything.
 
+import { patchBytes } from './patch';
 import type { PatchInfo, SlotRead } from './pedal';
 
 export const BACKUP_FORMAT = 'stomp-whisperer-backup';
@@ -102,6 +103,26 @@ export function parseBackup(text: string): Backup {
   checkSlots(info, slots);
   return { createdAt, info, slots };
 }
+
+/**
+ * The slots whose patches differ between a backup and what the pedal holds now (both
+ * complete). Only the patch's own bytes count, not the leftovers after it (see patchBytes).
+ * A backup from a pedal with another slot count or patch size can't be compared: it throws.
+ */
+export function changedSlots(backup: Backup, current: Backup): number[] {
+  const { info } = backup;
+  if (info.count !== current.info.count || info.patchSize !== current.info.patchSize) {
+    throw new BackupFormatError(
+      `backup is from a different pedal model (${info.count} slots of ${info.patchSize} bytes, ` +
+        `this pedal has ${current.info.count} of ${current.info.patchSize})`,
+    );
+  }
+  return backup.slots
+    .filter((read, i) => !sameBytes(patchBytes(read.data), patchBytes(current.slots[i]!.data)))
+    .map((read) => read.slot);
+}
+
+const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((byte, i) => byte === b[i]);
 
 /** A file name with the local date and time, e.g. stomp-whisperer-backup-2026-10-06-1830.json. */
 export function backupFileName(date: Date): string {

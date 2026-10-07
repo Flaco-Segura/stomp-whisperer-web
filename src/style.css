@@ -40,7 +40,7 @@ button {
 }
 button:disabled { opacity: 0.4; cursor: default; }
 button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
-#refresh { background: transparent; color: var(--ink); border: 1px solid var(--panel-line); }
+#refresh, #compare { background: transparent; color: var(--ink); border: 1px solid var(--panel-line); }
 
 /* ---------- top bar ---------- */
 
@@ -138,6 +138,19 @@ button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .slot-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slot-meta { color: var(--ink-dim); font-size: 0.85rem; }
 .slot.is-problem .slot-name { color: var(--red); }
+.slot.is-changed .slot-meta::before { content: "≠ "; color: var(--amber); font-weight: 700; }
+
+.compare-state {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.7rem;
+  border-left: 3px solid var(--green);
+  background: rgba(255, 255, 255, 0.04);
+  line-height: 1.45;
+}
+.compare-state.has-changes { border-left-color: var(--amber); }
+.compare-state.is-error { border-left-color: var(--red); }
+.backup-version { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--panel-line); }
+.backup-version h3 { margin: 0 0 0.5rem; color: var(--amber); font-size: 1rem; }
 
 /* ---------- detail ---------- */
 

@@ -6,7 +6,7 @@
 
 import './style.css';
 
-import { backupFileName, backupToJson, createBackup, type Backup } from './backup';
+import { backupFileName, backupToJson, changedSlots, createBackup, parseBackup, type Backup } from './backup';
 import { displayName, patchDescription, type Patch } from './patch';
 import { type PatchInfo, Pedal } from './pedal';
 import { type SlotEntry, effectIdHex, isFactorySlot, toSlotEntry, usedEffects } from './slots';
@@ -21,6 +21,9 @@ const statusText = $('#status-text');
 const connectButton = $<HTMLButtonElement>('#connect');
 const refreshButton = $<HTMLButtonElement>('#refresh');
 const backupButton = $<HTMLButtonElement>('#backup');
+const compareButton = $<HTMLButtonElement>('#compare');
+const backupFileInput = $<HTMLInputElement>('#backup-file');
+const compareState = $('#compare-state');
 const listState = $('#list-state');
 const slotList = $('#slots');
 const detail = $('#detail');
@@ -29,6 +32,9 @@ let pedal: Pedal | null = null;
 let entries: SlotEntry[] = [];
 // Every slot from the last complete read; null while reading or after a failed read.
 let lastBackup: Backup | null = null;
+// A backup file the user loaded, and the slots where it differs from the last read.
+let loadedBackup: Backup | null = null;
+let changed = new Set<number>();
 let selected: number | null = null;
 let reading = false;
 
@@ -57,6 +63,7 @@ function updateButtons(): void {
   connectButton.hidden = pedal !== null;
   refreshButton.disabled = pedal === null || reading;
   backupButton.disabled = lastBackup === null || reading;
+  compareButton.disabled = lastBackup === null || reading;
 }
 
 // ---------- connection ----------
@@ -101,6 +108,8 @@ async function readSlots(): Promise<void> {
   updateButtons();
   entries = [];
   lastBackup = null;
+  changed = new Set();
+  compareState.hidden = true;
   slotList.replaceChildren();
   listState.hidden = false;
   listState.textContent = 'Reading patches…';
@@ -117,6 +126,8 @@ async function readSlots(): Promise<void> {
     if (patchInfo) {
       lastBackup = createBackup(patchInfo, reads);
     }
+    // The pedal may have changed since the backup was loaded: compare again.
+    compare();
     listState.hidden = true;
     if (selected !== null) {
       showDetail(selected);
@@ -148,6 +159,68 @@ function downloadBackup(): void {
   URL.revokeObjectURL(url);
 }
 
+// ---------- comparing with a backup ----------
+
+/** Read the backup file the user picked (it comes from their disk: untrusted, so validated). */
+async function loadBackupFile(file: File): Promise<void> {
+  try {
+    loadedBackup = parseBackup(await file.text());
+  } catch (error) {
+    loadedBackup = null;
+    showCompareState('is-error', `${file.name} can't be used: ${messageOf(error)}`);
+  }
+  compare();
+}
+
+/** Compare the loaded backup with the last read and mark the slots that differ. */
+function compare(): void {
+  changed = new Set();
+  if (loadedBackup && lastBackup) {
+    try {
+      changed = new Set(changedSlots(loadedBackup, lastBackup));
+      const when = loadedBackup.createdAt.toLocaleString();
+      if (changed.size === 0) {
+        showCompareState('', `Backup from ${when} matches the pedal: all ${lastBackup.info.count} slots are identical.`);
+      } else {
+        const list = [...changed].join(', ');
+        const slots = changed.size === 1 ? 'slot differs' : 'slots differ';
+        showCompareState('has-changes', `Backup from ${when}: ${changed.size} ${slots} from the pedal (${list}).`);
+      }
+    } catch (error) {
+      loadedBackup = null;
+      showCompareState('is-error', `Can't compare: ${messageOf(error)}`);
+    }
+  }
+  for (const button of slotList.querySelectorAll<HTMLElement>('.slot')) {
+    button.classList.toggle('is-changed', changed.has(Number(button.dataset.slot)));
+  }
+  if (selected !== null) {
+    showDetail(selected);
+  }
+}
+
+function showCompareState(className: string, text: string): void {
+  compareState.className = `compare-state ${className}`;
+  compareState.textContent = text;
+  compareState.hidden = false;
+}
+
+/** How a slot that differs looks in the backup, under the pedal's version. */
+function backupVersion(slot: number): Node {
+  const read = loadedBackup?.slots[slot - 1];
+  const section = el('section', 'backup-version', el('h3', '', 'In the backup'));
+  if (!read) {
+    return section;
+  }
+  const entry = toSlotEntry(read);
+  if (entry.patch) {
+    section.append(el('h2', '', displayName(entry.patch) || '(no name)'), ...patchBody(entry.patch));
+  } else {
+    section.append(el('p', 'detail-empty', entry.error ?? 'Unknown error'));
+  }
+  return section;
+}
+
 // ---------- rendering ----------
 
 function slotItem(entry: SlotEntry): HTMLLIElement {
@@ -164,6 +237,7 @@ function slotItem(entry: SlotEntry): HTMLLIElement {
   button.dataset.slot = String(slot);
   button.classList.toggle('is-user', !isFactorySlot(slot));
   button.classList.toggle('is-problem', !patch || !entry.checksumOk);
+  button.classList.toggle('is-changed', changed.has(slot));
   button.setAttribute('aria-current', String(slot === selected));
   button.addEventListener('click', () => showDetail(slot));
   return el('li', '', button);
@@ -195,6 +269,9 @@ function showDetail(slot: number): void {
     parts.push(...patchBody(entry.patch));
   } else {
     parts.push(el('p', 'warning', entry.error ?? 'Unknown error'));
+  }
+  if (changed.has(slot)) {
+    parts.push(backupVersion(slot));
   }
   detail.replaceChildren(...parts);
 }
@@ -237,4 +314,13 @@ function patchBody(patch: Patch): Node[] {
 connectButton.addEventListener('click', () => void connect());
 refreshButton.addEventListener('click', () => void readSlots());
 backupButton.addEventListener('click', downloadBackup);
+// The button opens the browser's file picker of the hidden <input type="file">.
+compareButton.addEventListener('click', () => backupFileInput.click());
+backupFileInput.addEventListener('change', () => {
+  const file = backupFileInput.files?.[0];
+  backupFileInput.value = ''; // so picking the same file again fires 'change' again
+  if (file) {
+    void loadBackupFile(file);
+  }
+});
 updateButtons();

@@ -242,20 +242,32 @@ function readChunks(data: Uint8Array, offset: number): Map<string, Uint8Array> {
   return chunks;
 }
 
+/**
+ * The bytes that belong to the patch, as its header's length says. The pedal sends a full
+ * patch-size buffer, and past that length it holds leftovers of other patches that change
+ * on their own. Data that doesn't look like a patch is returned whole.
+ */
+export function patchBytes(input: Uint8Array): Uint8Array {
+  if (input.length < HEADER_SIZE || decodeAscii(input.subarray(0, 4)) !== MAGIC) {
+    return input;
+  }
+  const length = viewOf(input).getUint32(4, true);
+  return HEADER_SIZE <= length && length <= input.length ? input.subarray(0, length) : input;
+}
+
 export function parsePatch(input: Uint8Array): Patch {
   if (input.length < HEADER_SIZE || decodeAscii(input.subarray(0, 4)) !== MAGIC) {
     throw new PatchFormatError('missing PTCF header');
   }
 
   const view = viewOf(input);
-  const length = view.getUint32(4, true);
   const version = view.getUint32(8, true);
   const fxCount = view.getUint32(12, true);
   const target = view.getUint32(16, true);
   const reserved = input.slice(20, 26);
   const rawName = input.subarray(26, HEADER_SIZE);
 
-  const data = HEADER_SIZE <= length && length <= input.length ? input.subarray(0, length) : input;
+  const data = patchBytes(input);
   const idsEnd = HEADER_SIZE + 4 * fxCount;
   if (idsEnd > data.length) {
     throw new PatchFormatError(`fx_count=${fxCount} exceeds patch size`);

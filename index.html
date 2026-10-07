@@ -20,6 +20,10 @@
         <button type="button" id="backup" disabled title="Save every slot read from the pedal to a file">
           Download backup
         </button>
+        <button type="button" id="compare" disabled title="Compare a backup file with the slots on the pedal">
+          Compare with backup…
+        </button>
+        <input type="file" id="backup-file" accept=".json,application/json" hidden />
       </div>
     </header>
 
@@ -30,6 +34,7 @@
           Plug in your Zoom MS-50G+ via USB, power it on and press <strong>Connect pedal</strong>.
           Nothing is ever written to the pedal from this page.
         </p>
+        <p class="compare-state" id="compare-state" hidden></p>
         <ol class="slots" id="slots"></ol>
       </aside>
 

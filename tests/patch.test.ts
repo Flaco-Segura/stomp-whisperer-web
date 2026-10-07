@@ -8,6 +8,7 @@ import {
   formatName,
   paramLimit,
   parsePatch,
+  patchBytes,
 } from '../src/patch';
 import {
   type EditOp,
@@ -89,6 +90,15 @@ describe('patch', () => {
 
   it('rejects data without the PTCF header', () => {
     expect(() => parsePatch(new Uint8Array(40))).toThrow(PatchFormatError);
+  });
+
+  it('knows where the patch ends inside a larger buffer', () => {
+    const bytes = encodePatch(samplePatch());
+    const buffer = new Uint8Array(bytes.length + 20).fill(0x4c); // leftovers after the patch
+    buffer.set(bytes);
+    expect(patchBytes(buffer)).toEqual(bytes);
+    const notAPatch = new Uint8Array([1, 2, 3]);
+    expect(patchBytes(notAPatch)).toBe(notAPatch);
   });
 
   it('parses back what it encodes', () => {
