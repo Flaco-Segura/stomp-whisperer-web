@@ -1,13 +1,14 @@
 // A pretend MS-50G+ behind a SysexTransport, so the Pedal class can be tested without
-// hardware. It answers the read-only commands the way the real pedal does.
-import type { SysexTransport } from '../src/pedal';
+// hardware. It answers the commands the way the real pedal does, and stores uploads.
+import { type SysexTransport, decodePatchReply } from '../src/pedal';
 import * as protocol from '../src/protocol';
 
 export class FakePedal implements SysexTransport {
   readonly sent: Uint8Array[] = [];
   silent = false; // when true, it never answers
+  corruptWrites = false; // when true, an upload stores its data with one byte flipped
   private handler: ((body: Uint8Array) => void) | null = null;
-  private readonly slots: Uint8Array[];
+  readonly slots: Uint8Array[];
   private readonly bankSize: number;
   private readonly patchSize: number;
 
@@ -55,6 +56,17 @@ export class FakePedal implements SysexTransport {
         const location = body[8]! + (body[9]! << 7);
         const slot = bank * this.bankSize + location + 1;
         return protocol.patchUpload(slot, this.bankSize, this.slots[slot - 1]!);
+      }
+      case 0x45: { // patch_upload: store the data
+        const bank = body[6]! + (body[7]! << 7);
+        const location = body[8]! + (body[9]! << 7);
+        const slot = bank * this.bankSize + location + 1;
+        const { data } = decodePatchReply(body, 12);
+        if (this.corruptWrites) {
+          data[10] = data[10]! ^ 0x01;
+        }
+        this.slots[slot - 1] = data;
+        return Uint8Array.from([...head, 0x00]);
       }
       default: // pc mode on/off and anything else get a bare acknowledgement
         return Uint8Array.from([...head, 0x00]);

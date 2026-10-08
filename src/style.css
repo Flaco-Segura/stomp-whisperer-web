@@ -149,6 +149,14 @@ button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 }
 .compare-state.has-changes { border-left-color: var(--amber); }
 .compare-state.is-error { border-left-color: var(--red); }
+.slot.is-changed.is-state-only .slot-meta::before { color: var(--ink-dim); }
+.changes { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--panel-line); }
+.changes h3 { margin: 0 0 0.5rem; color: var(--amber); font-size: 1rem; }
+.changes h4 { margin: 0.8rem 0 0.3rem; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-dim); }
+.change-list { margin: 0; padding-left: 1.2rem; line-height: 1.5; }
+.change-list.is-state { color: var(--ink-dim); }
+.restore-box { margin-top: 1rem; }
+.restore-note { margin: 0.4rem 0 0; color: var(--ink-dim); font-size: 0.85rem; }
 .backup-version { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--panel-line); }
 .backup-version h3 { margin: 0 0 0.5rem; color: var(--amber); font-size: 1rem; }
 

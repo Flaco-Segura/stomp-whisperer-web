@@ -1,10 +1,11 @@
-// Request/reply exchanges with the pedal, and the read-only operations built on them.
-// Port of the read side of stomp_whisperer/pedal.py.
+// Request/reply exchanges with the pedal, and the operations built on them: reading every
+// slot and writing one user slot. Port of stomp_whisperer/pedal.py.
 //
 // The MIDI connection itself comes from outside as a SysexTransport: src/webmidi.ts in
 // the browser, a fake pedal in the tests. That keeps this module free of browser APIs.
 
 import * as protocol from './protocol';
+import { FIRST_USER_SLOT } from './slots';
 
 export interface SysexTransport {
   /** Send one SysEx body (without the F0 / F7 framing). */
@@ -16,6 +17,11 @@ export interface SysexTransport {
 
 export class PedalTimeoutError extends Error {
   override name = 'PedalTimeoutError';
+}
+
+/** The pedal didn't store what was written: the slot read back holds something else. */
+export class PedalWriteError extends Error {
+  override name = 'PedalWriteError';
 }
 
 export interface PatchInfo {
@@ -126,6 +132,48 @@ export class Pedal {
       `patch_download(${location})`,
     );
     return { slot: location, ...decodePatchReply(reply, 12) };
+  }
+
+  /**
+   * Store PTCF `patch` bytes in user slot `location`, then read the slot back to check it.
+   *
+   * The slot is sent padded with zeros to its full size, as the Python app does. Only the
+   * patch's own bytes are compared (see patchBytes): the pedal fills the rest of the slot
+   * with leftovers. Factory slots are refused here too, whatever the caller checked.
+   * Returns the slot as read back; throws PedalWriteError if it doesn't hold `patch`.
+   * Call it inside PC mode (writeSlot does).
+   */
+  async uploadPatch(location: number, info: PatchInfo, patch: Uint8Array): Promise<SlotRead> {
+    if (!Number.isInteger(location) || location < FIRST_USER_SLOT || location > info.count) {
+      throw new RangeError(`Only user slots ${FIRST_USER_SLOT}–${info.count} can be written, not ${location}`);
+    }
+    if (patch.length === 0 || patch.length > info.patchSize) {
+      throw new RangeError(`A patch must be 1 to ${info.patchSize} bytes, not ${patch.length}`);
+    }
+    const isPtcf = patch.length >= 8 && String.fromCharCode(...patch.subarray(0, 4)) === 'PTCF';
+    const length = isPtcf ? new DataView(patch.buffer, patch.byteOffset, 8).getUint32(4, true) : 0;
+    if (!isPtcf || length < 8 || length > patch.length) {
+      throw new RangeError('Not a PTCF patch');
+    }
+    const data = new Uint8Array(info.patchSize);
+    data.set(patch);
+    await this.request(protocol.patchUpload(location, info.bankSize, data), `patch_upload(${location})`);
+    const stored = await this.downloadPatch(location, info.bankSize);
+    const same = stored.data.length >= length && patch.subarray(0, length).every((byte, i) => byte === stored.data[i]);
+    if (!stored.checksumOk || !same) {
+      throw new PedalWriteError(`Slot ${location} doesn't hold the patch after writing it`);
+    }
+    return stored;
+  }
+
+  /** Write one user slot inside PC mode and return it as read back (see uploadPatch). */
+  async writeSlot(location: number, patch: Uint8Array): Promise<SlotRead> {
+    await this.pcModeOn();
+    try {
+      return await this.uploadPatch(location, await this.patchCheck(), patch);
+    } finally {
+      await this.pcModeOff();
+    }
   }
 
   /** Read every patch slot, in order, reporting each one as it arrives. */

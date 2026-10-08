@@ -1,5 +1,6 @@
-// Read-only UI: connect to the pedal over Web MIDI, read every patch slot and show
-// each patch's effect chain. Nothing here writes to the pedal.
+// The UI: connect to the pedal over Web MIDI, read every patch slot and show each patch's
+// effect chain. The only write is restoring a user slot from a backup, after the user
+// downloaded a backup of the pedal and confirmed it (see restoreSlot).
 //
 // Patch data may come from untrusted sources later (shared presets), so text from a
 // patch is only ever put on the page with textContent, never as HTML.
@@ -7,7 +8,8 @@
 import './style.css';
 
 import { backupFileName, backupToJson, changedSlots, createBackup, parseBackup, type Backup } from './backup';
-import { displayName, patchDescription, type Patch } from './patch';
+import { type Change, patchChanges } from './diff';
+import { displayName, patchBytes, patchDescription, type Patch } from './patch';
 import { type PatchInfo, Pedal } from './pedal';
 import { type SlotEntry, effectIdHex, isFactorySlot, toSlotEntry, usedEffects } from './slots';
 import { isPedalPort, openPedal, requestMidi } from './webmidi';
@@ -32,11 +34,17 @@ let pedal: Pedal | null = null;
 let entries: SlotEntry[] = [];
 // Every slot from the last complete read; null while reading or after a failed read.
 let lastBackup: Backup | null = null;
-// A backup file the user loaded, and the slots where it differs from the last read.
+// A backup file the user loaded, and the slots where it differs from the last read, each
+// with what changed (null if either side can't be parsed).
 let loadedBackup: Backup | null = null;
-let changed = new Set<number>();
+let changed = new Map<number, Change[] | null>();
 let selected: number | null = null;
 let reading = false;
+let writing = false;
+// Whether the user downloaded a backup since the last read: no write is allowed before.
+let backupDownloaded = false;
+
+const busy = () => reading || writing;
 
 /** Create an element with a class and children (strings become text nodes, never HTML). */
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -61,9 +69,9 @@ const messageOf = (error: unknown) => (error instanceof Error ? error.message : 
 
 function updateButtons(): void {
   connectButton.hidden = pedal !== null;
-  refreshButton.disabled = pedal === null || reading;
-  backupButton.disabled = lastBackup === null || reading;
-  compareButton.disabled = lastBackup === null || reading;
+  refreshButton.disabled = pedal === null || busy();
+  backupButton.disabled = lastBackup === null || busy();
+  compareButton.disabled = lastBackup === null || busy();
 }
 
 // ---------- connection ----------
@@ -101,14 +109,16 @@ function disconnect(reason: string): void {
 // ---------- reading ----------
 
 async function readSlots(): Promise<void> {
-  if (!pedal || reading) {
+  if (!pedal || busy()) {
     return;
   }
   reading = true;
+  // The pedal may have changed since the last backup (it saves edits by itself).
+  backupDownloaded = false;
   updateButtons();
   entries = [];
   lastBackup = null;
-  changed = new Set();
+  changed = new Map();
   compareState.hidden = true;
   slotList.replaceChildren();
   listState.hidden = false;
@@ -157,6 +167,75 @@ function downloadBackup(): void {
   link.download = backupFileName(lastBackup.createdAt);
   link.click();
   URL.revokeObjectURL(url);
+  backupDownloaded = true;
+  if (selected !== null) {
+    showDetail(selected); // the restore button may be enabled now
+  }
+}
+
+// ---------- restoring a slot from a backup ----------
+
+/** Why `slot` can't be restored from the loaded backup right now, or null if it can. */
+function restoreBlocker(slot: number): string | null {
+  const read = loadedBackup?.slots[slot - 1];
+  if (isFactorySlot(slot)) {
+    return 'Factory slots (1–85) are never written from this page.';
+  }
+  if (!read || !pedal) {
+    return 'Connect the pedal and load a backup to restore this slot.';
+  }
+  if (!read.checksumOk || !toSlotEntry(read).patch) {
+    return "The backup's copy of this slot is damaged or empty: it can't be restored.";
+  }
+  if (!backupDownloaded) {
+    return 'Download a backup of the pedal first: it keeps what this slot holds now.';
+  }
+  return null;
+}
+
+function restoreControl(slot: number): Node {
+  const blocker = restoreBlocker(slot);
+  const button = el('button', 'restore', `Restore slot ${slot} from the backup`);
+  button.type = 'button';
+  button.disabled = blocker !== null || busy();
+  button.addEventListener('click', () => void restoreSlot(slot));
+  const note = blocker ?? 'Writes the backup\'s version to the pedal and reads the slot back to check it.';
+  return el('div', 'restore-box', button, el('p', 'restore-note', note));
+}
+
+/** Write the backup's version of a user slot to the pedal, after the user confirms. */
+async function restoreSlot(slot: number): Promise<void> {
+  if (restoreBlocker(slot) !== null || busy() || !pedal || !loadedBackup || !lastBackup) {
+    return;
+  }
+  const read = loadedBackup.slots[slot - 1]!;
+  const name = displayName(toSlotEntry(read).patch!) || '(no name)';
+  const question =
+    `Write slot ${slot} on the pedal?\n\n` +
+    `It will hold "${name}" again, as in the backup from ${loadedBackup.createdAt.toLocaleString()}.\n` +
+    'What the slot holds now is only kept in the backup you downloaded.';
+  if (!window.confirm(question)) {
+    return;
+  }
+  writing = true;
+  updateButtons();
+  showDetail(slot);
+  setStatus('busy', `Writing slot ${slot}…`);
+  try {
+    // Only the patch's own bytes: the leftovers after it are not part of it.
+    const stored = await pedal.writeSlot(slot, patchBytes(read.data));
+    const entry = toSlotEntry(stored);
+    entries = entries.map((e) => (e.slot === slot ? entry : e));
+    lastBackup = { ...lastBackup, slots: lastBackup.slots.map((r) => (r.slot === slot ? stored : r)) };
+    slotList.querySelector(`.slot[data-slot="${slot}"]`)?.parentElement?.replaceWith(slotItem(entry));
+    setStatus('connected', `Slot ${slot} restored and checked: it holds the backup's version.`);
+  } catch (error) {
+    setStatus('error', `Slot ${slot} was not restored: ${messageOf(error)}. Read the pedal again to see its state.`);
+  } finally {
+    writing = false;
+    updateButtons();
+    compare(); // redraws the detail too
+  }
 }
 
 // ---------- comparing with a backup ----------
@@ -174,17 +253,24 @@ async function loadBackupFile(file: File): Promise<void> {
 
 /** Compare the loaded backup with the last read and mark the slots that differ. */
 function compare(): void {
-  changed = new Set();
+  changed = new Map();
   if (loadedBackup && lastBackup) {
     try {
-      changed = new Set(changedSlots(loadedBackup, lastBackup));
+      for (const slot of changedSlots(loadedBackup, lastBackup)) {
+        changed.set(slot, slotChanges(loadedBackup, lastBackup, slot));
+      }
       const when = loadedBackup.createdAt.toLocaleString();
       if (changed.size === 0) {
         showCompareState('', `Backup from ${when} matches the pedal: all ${lastBackup.info.count} slots are identical.`);
       } else {
-        const list = [...changed].join(', ');
+        const stateOnly = [...changed.keys()].filter(isStateOnly);
+        const sound = [...changed.keys()].filter((slot) => !isStateOnly(slot));
         const slots = changed.size === 1 ? 'slot differs' : 'slots differ';
-        showCompareState('has-changes', `Backup from ${when}: ${changed.size} ${slots} from the pedal (${list}).`);
+        const parts = [
+          sound.length ? `sound or unknown: ${sound.join(', ')}` : '',
+          stateOnly.length ? `pedal state only: ${stateOnly.join(', ')}` : '',
+        ].filter(Boolean);
+        showCompareState('has-changes', `Backup from ${when}: ${changed.size} ${slots} from the pedal (${parts.join('; ')}).`);
       }
     } catch (error) {
       loadedBackup = null;
@@ -192,7 +278,7 @@ function compare(): void {
     }
   }
   for (const button of slotList.querySelectorAll<HTMLElement>('.slot')) {
-    button.classList.toggle('is-changed', changed.has(Number(button.dataset.slot)));
+    markChanged(button, Number(button.dataset.slot));
   }
   if (selected !== null) {
     showDetail(selected);
@@ -203,6 +289,45 @@ function showCompareState(className: string, text: string): void {
   compareState.className = `compare-state ${className}`;
   compareState.textContent = text;
   compareState.hidden = false;
+}
+
+/** What changed in a slot, from the backup to the pedal; null if a side can't be parsed. */
+function slotChanges(backup: Backup, current: Backup, slot: number): Change[] | null {
+  const [before, after] = [toSlotEntry(backup.slots[slot - 1]!), toSlotEntry(current.slots[slot - 1]!)];
+  return before.patch && after.patch ? patchChanges(before.patch, after.patch) : null;
+}
+
+/** True if a slot differs only in pedal state (PRM2): it most likely sounds the same. */
+function isStateOnly(slot: number): boolean {
+  const changes = changed.get(slot);
+  return !!changes?.length && changes.every((change) => change.kind === 'state');
+}
+
+function markChanged(button: HTMLElement, slot: number): void {
+  button.classList.toggle('is-changed', changed.has(slot));
+  button.classList.toggle('is-state-only', isStateOnly(slot));
+}
+
+/** The list of changes of a slot that differs, split into sound and pedal state. */
+function changeList(slot: number): Node {
+  const section = el('section', 'changes', el('h3', '', 'What changed since the backup'));
+  const changes = changed.get(slot);
+  if (!changes) {
+    section.append(el('p', 'detail-empty', 'One of the two versions can\'t be read as a patch: compare them below.'));
+    return section;
+  }
+  if (changes.length === 0) {
+    section.append(el('p', 'detail-empty', 'The bytes differ, but in no field this app understands yet.'));
+    return section;
+  }
+  const groups: [Change['kind'], string][] = [['sound', 'Sound'], ['state', 'Pedal state (PRM2)']];
+  for (const [kind, title] of groups) {
+    const texts = changes.filter((change) => change.kind === kind).map((change) => el('li', '', change.text));
+    if (texts.length) {
+      section.append(el('h4', '', title), el('ul', `change-list is-${kind}`, ...texts));
+    }
+  }
+  return section;
 }
 
 /** How a slot that differs looks in the backup, under the pedal's version. */
@@ -237,7 +362,7 @@ function slotItem(entry: SlotEntry): HTMLLIElement {
   button.dataset.slot = String(slot);
   button.classList.toggle('is-user', !isFactorySlot(slot));
   button.classList.toggle('is-problem', !patch || !entry.checksumOk);
-  button.classList.toggle('is-changed', changed.has(slot));
+  markChanged(button, slot);
   button.setAttribute('aria-current', String(slot === selected));
   button.addEventListener('click', () => showDetail(slot));
   return el('li', '', button);
@@ -271,7 +396,7 @@ function showDetail(slot: number): void {
     parts.push(el('p', 'warning', entry.error ?? 'Unknown error'));
   }
   if (changed.has(slot)) {
-    parts.push(backupVersion(slot));
+    parts.push(changeList(slot), restoreControl(slot), backupVersion(slot));
   }
   detail.replaceChildren(...parts);
 }

@@ -299,6 +299,15 @@ const PRM2_EDIT_SLOT = 85n;
 const PRM2_EDIT_MASK = 0b111n;
 const CHUNK_ORDER = ['TXJ1', 'TXE1', 'EDTB', 'PRM2', 'NAME'];
 
+/** Position (0-based) of the effect selected on the pedal's screen, or null without PRM2. */
+export function editedEffect(patch: Patch): number | null {
+  const prm2 = patch.chunks.get('PRM2');
+  if (prm2?.length !== PRM2_SIZE) {
+    return null;
+  }
+  return Number((fromLittleEndian(prm2) >> PRM2_EDIT_SLOT) & PRM2_EDIT_MASK);
+}
+
 function encodeEffect(effect: Effect): Uint8Array {
   let bits = effect.enabled ? 1n : 0n;
   let shift = 1n;
