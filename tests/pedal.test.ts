@@ -109,6 +109,59 @@ describe('Pedal writes', () => {
     await expect(new Pedal(fake).writeSlot(86, patch)).rejects.toThrow(PedalWriteError);
     expect(fake.commands().at(-1)).toBe(PC_MODE_OFF);
   });
+
+  it('writes several slots in one PC mode session, reporting each one', async () => {
+    const fake = new FakePedal(pedalSlots(), { patchSize: 128 });
+    const reported: number[] = [];
+    const stored = await new Pedal(fake).writeSlots(
+      [{ slot: 90, patch }, { slot: 86, patch }],
+      (read) => reported.push(read.slot),
+    );
+
+    expect(fake.commands()).toEqual([
+      PC_MODE_ON, PATCH_CHECK, PATCH_UPLOAD, PATCH_DOWNLOAD, PATCH_UPLOAD, PATCH_DOWNLOAD, PC_MODE_OFF,
+    ]);
+    expect(stored.map((read) => read.slot)).toEqual([90, 86]);
+    expect(reported).toEqual([90, 86]);
+    expect(toHex(fake.slots[89]!.subarray(0, patch.length))).toBe(toHex(patch));
+    expect(toHex(fake.slots[85]!.subarray(0, patch.length))).toBe(toHex(patch));
+  });
+
+  it('sends nothing if any write in the list is wrong', async () => {
+    const fake = new FakePedal(pedalSlots(), { patchSize: 128 });
+    const pedal = new Pedal(fake);
+    await expect(pedal.writeSlots([{ slot: 86, patch }, { slot: 85, patch }])).rejects.toThrow('Only user slots');
+    await expect(pedal.writeSlots([{ slot: 86, patch }, { slot: 87, patch: bytes(40, 3) }])).rejects.toThrow(
+      'Not a PTCF patch',
+    );
+    await expect(pedal.writeSlots([{ slot: 86, patch }, { slot: 86, patch }])).rejects.toThrow('only be written once');
+    expect(fake.commands()).not.toContain(PATCH_UPLOAD);
+    expect(toHex(fake.slots[85]!)).toBe(toHex(pedalSlots()[85]!));
+  });
+
+  it('stops at the first slot that fails, keeping the ones written before', async () => {
+    const fake = new FakePedal(pedalSlots(), { patchSize: 128 });
+    const reported: number[] = [];
+    let uploads = 0;
+    const send = fake.send.bind(fake);
+    fake.send = (body) => {
+      // The second upload gets stored with a byte flipped.
+      if (body[3] === PATCH_UPLOAD && ++uploads === 2) {
+        fake.corruptWrites = true;
+      }
+      send(body);
+    };
+    await expect(
+      new Pedal(fake).writeSlots(
+        [{ slot: 86, patch }, { slot: 87, patch }, { slot: 88, patch }],
+        (read) => reported.push(read.slot),
+      ),
+    ).rejects.toThrow('Slot 87');
+
+    expect(reported).toEqual([86]);
+    expect(fake.commands().filter((command) => command === PATCH_UPLOAD)).toHaveLength(2); // 88 never sent
+    expect(fake.commands().at(-1)).toBe(PC_MODE_OFF);
+  });
 });
 
 describe.skipIf(!hasGolden)('Pedal against golden files', () => {

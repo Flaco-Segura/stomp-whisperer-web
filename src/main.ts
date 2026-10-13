@@ -1,6 +1,6 @@
 // The UI: connect to the pedal over Web MIDI, read every patch slot and show each patch's
-// effect chain. The only write is restoring a user slot from a backup, after the user
-// downloaded a backup of the pedal and confirmed it (see restoreSlot).
+// effect chain. The only write is restoring user slots from a backup, after the user
+// downloaded a backup of the pedal and confirmed it (see restoreSlots).
 //
 // Patch data may come from untrusted sources later (shared presets), so text from a
 // patch is only ever put on the page with textContent, never as HTML.
@@ -10,7 +10,7 @@ import './style.css';
 import { backupFileName, backupToJson, changedSlots, createBackup, parseBackup, type Backup } from './backup';
 import { type Change, patchChanges } from './diff';
 import { displayName, patchBytes, patchDescription, type Patch } from './patch';
-import { type PatchInfo, Pedal } from './pedal';
+import { type PatchInfo, Pedal, type SlotRead } from './pedal';
 import { type SlotEntry, effectIdHex, isFactorySlot, toSlotEntry, usedEffects } from './slots';
 import { isPedalPort, openPedal, requestMidi } from './webmidi';
 
@@ -26,6 +26,7 @@ const backupButton = $<HTMLButtonElement>('#backup');
 const compareButton = $<HTMLButtonElement>('#compare');
 const backupFileInput = $<HTMLInputElement>('#backup-file');
 const compareState = $('#compare-state');
+const restoreManyButton = $<HTMLButtonElement>('#restore-many');
 const listState = $('#list-state');
 const slotList = $('#slots');
 const detail = $('#detail');
@@ -39,6 +40,8 @@ let lastBackup: Backup | null = null;
 let loadedBackup: Backup | null = null;
 let changed = new Map<number, Change[] | null>();
 let selected: number | null = null;
+// Whether the detail panel shows the restore-several-slots panel instead of a slot.
+let restorePanelOpen = false;
 let reading = false;
 let writing = false;
 // Whether the user downloaded a backup since the last read: no write is allowed before.
@@ -72,6 +75,7 @@ function updateButtons(): void {
   refreshButton.disabled = pedal === null || busy();
   backupButton.disabled = lastBackup === null || busy();
   compareButton.disabled = lastBackup === null || busy();
+  restoreManyButton.disabled = busy();
 }
 
 // ---------- connection ----------
@@ -120,6 +124,7 @@ async function readSlots(): Promise<void> {
   lastBackup = null;
   changed = new Map();
   compareState.hidden = true;
+  restoreManyButton.hidden = true;
   slotList.replaceChildren();
   listState.hidden = false;
   listState.textContent = 'Reading patches…';
@@ -139,9 +144,6 @@ async function readSlots(): Promise<void> {
     // The pedal may have changed since the backup was loaded: compare again.
     compare();
     listState.hidden = true;
-    if (selected !== null) {
-      showDetail(selected);
-    }
   } catch (error) {
     listState.textContent = `Reading stopped: ${messageOf(error)}`;
     setStatus('error', messageOf(error));
@@ -168,69 +170,159 @@ function downloadBackup(): void {
   link.click();
   URL.revokeObjectURL(url);
   backupDownloaded = true;
-  if (selected !== null) {
-    showDetail(selected); // the restore button may be enabled now
-  }
+  redrawDetail(); // the restore buttons may be enabled now
 }
 
-// ---------- restoring a slot from a backup ----------
+// ---------- restoring slots from a backup ----------
 
-/** Why `slot` can't be restored from the loaded backup right now, or null if it can. */
-function restoreBlocker(slot: number): string | null {
+/** Why `slot` itself can't be restored from the loaded backup, or null if it can. */
+function slotBlocker(slot: number): string | null {
   const read = loadedBackup?.slots[slot - 1];
   if (isFactorySlot(slot)) {
     return 'Factory slots (1–85) are never written from this page.';
   }
-  if (!read || !pedal) {
-    return 'Connect the pedal and load a backup to restore this slot.';
+  if (!read) {
+    return 'Load a backup to restore this slot.';
   }
   if (!read.checksumOk || !toSlotEntry(read).patch) {
     return "The backup's copy of this slot is damaged or empty: it can't be restored.";
   }
+  return null;
+}
+
+/** Why nothing can be written to the pedal right now, or null if it can. */
+function writeBlocker(): string | null {
+  if (!pedal || !lastBackup) {
+    return 'Connect the pedal and read it to restore slots.';
+  }
   if (!backupDownloaded) {
-    return 'Download a backup of the pedal first: it keeps what this slot holds now.';
+    return 'Download a backup of the pedal first: it keeps what the slots hold now.';
   }
   return null;
 }
+
+const restoreBlocker = (slot: number) => slotBlocker(slot) ?? writeBlocker();
+
+/** User slots that differ from the loaded backup, in order. */
+const changedUserSlots = () => [...changed.keys()].filter((slot) => !isFactorySlot(slot)).sort((a, b) => a - b);
+
+const backupName = (slot: number) => displayName(toSlotEntry(loadedBackup!.slots[slot - 1]!).patch!) || '(no name)';
 
 function restoreControl(slot: number): Node {
   const blocker = restoreBlocker(slot);
   const button = el('button', 'restore', `Restore slot ${slot} from the backup`);
   button.type = 'button';
   button.disabled = blocker !== null || busy();
-  button.addEventListener('click', () => void restoreSlot(slot));
+  button.addEventListener('click', () => void restoreSlots([slot]));
   const note = blocker ?? 'Writes the backup\'s version to the pedal and reads the slot back to check it.';
   return el('div', 'restore-box', button, el('p', 'restore-note', note));
 }
 
-/** Write the backup's version of a user slot to the pedal, after the user confirms. */
-async function restoreSlot(slot: number): Promise<void> {
-  if (restoreBlocker(slot) !== null || busy() || !pedal || !loadedBackup || !lastBackup) {
+/** The panel to pick several user slots to restore; sound changes come checked. */
+function showRestorePanel(): void {
+  selected = null;
+  restorePanelOpen = true;
+  for (const button of slotList.querySelectorAll<HTMLElement>('.slot')) {
+    button.setAttribute('aria-current', 'false');
+  }
+  const slots = changedUserSlots();
+  const when = loadedBackup?.createdAt.toLocaleString() ?? '';
+  const panel = el(
+    'section',
+    'restore-panel',
+    el('p', 'detail-kind', 'User slots 86–100'),
+    el('h2', '', 'Restore from the backup'),
+    el('p', 'description', `User slots that differ from the backup from ${when}. Each one is written with the backup's version and read back to check it.`),
+  );
+  if (slots.length === 0) {
+    panel.append(el('p', 'detail-empty', 'No user slot differs from the backup.'));
+    detail.replaceChildren(panel);
     return;
   }
-  const read = loadedBackup.slots[slot - 1]!;
-  const name = displayName(toSlotEntry(read).patch!) || '(no name)';
+  const choices = el('ul', 'restore-choices');
+  for (const slot of slots) {
+    const blocker = slotBlocker(slot);
+    const box = el('input');
+    box.type = 'checkbox';
+    box.value = String(slot);
+    box.checked = blocker === null && !isStateOnly(slot);
+    box.disabled = blocker !== null || busy();
+    const current = entries.find((entry) => entry.slot === slot)?.patch;
+    const now = current ? displayName(current) || '(no name)' : 'unreadable';
+    const label = el(
+      'label',
+      `restore-choice${blocker ? ' is-blocked' : ''}`,
+      box,
+      el('span', 'slot-number', String(slot).padStart(3, '0')),
+      el('span', '', blocker ? '' : backupName(slot)),
+      el('span', 'restore-tag', blocker ?? `now: ${now}${isStateOnly(slot) ? ' · pedal state only' : ''}`),
+    );
+    choices.append(el('li', '', label));
+  }
+  const blocker = writeBlocker();
+  const button = el('button', 'restore', 'Restore the checked slots');
+  button.type = 'button';
+  button.disabled = blocker !== null || busy();
+  button.addEventListener('click', () => {
+    const checked = [...choices.querySelectorAll<HTMLInputElement>('input:checked')].map((box) => Number(box.value));
+    void restoreSlots(checked);
+  });
+  const note = blocker ?? 'Slots that differ only in pedal state (like the effect selected on screen) sound the same: they start unchecked.';
+  panel.append(choices, el('div', 'restore-box', button, el('p', 'restore-note', note)));
+  detail.replaceChildren(panel);
+}
+
+/** Take a slot as read back after writing it as the pedal's current version. */
+function storeWritten(stored: SlotRead): void {
+  const entry = toSlotEntry(stored);
+  entries = entries.map((e) => (e.slot === stored.slot ? entry : e));
+  lastBackup = { ...lastBackup!, slots: lastBackup!.slots.map((r) => (r.slot === stored.slot ? stored : r)) };
+  slotList.querySelector(`.slot[data-slot="${stored.slot}"]`)?.parentElement?.replaceWith(slotItem(entry));
+}
+
+/** Write the backup's version of some user slots to the pedal, after the user confirms. */
+async function restoreSlots(slots: number[]): Promise<void> {
+  if (slots.length === 0 || slots.some((slot) => restoreBlocker(slot) !== null) || busy() || !pedal || !loadedBackup) {
+    return;
+  }
+  const when = loadedBackup.createdAt.toLocaleString();
   const question =
-    `Write slot ${slot} on the pedal?\n\n` +
-    `It will hold "${name}" again, as in the backup from ${loadedBackup.createdAt.toLocaleString()}.\n` +
-    'What the slot holds now is only kept in the backup you downloaded.';
+    slots.length === 1
+      ? `Write slot ${slots[0]} on the pedal?\n\n` +
+        `It will hold "${backupName(slots[0]!)}" again, as in the backup from ${when}.\n` +
+        'What the slot holds now is only kept in the backup you downloaded.'
+      : `Write ${slots.length} slots on the pedal?\n\n` +
+        slots.map((slot) => `  ${slot}: "${backupName(slot)}"`).join('\n') +
+        `\n\nThey will hold these patches again, as in the backup from ${when}.\n` +
+        'What the slots hold now is only kept in the backup you downloaded.';
   if (!window.confirm(question)) {
     return;
   }
+  const backup = loadedBackup;
+  // Only the patch's own bytes: the leftovers after it are not part of it.
+  const writes = slots.map((slot) => ({ slot, patch: patchBytes(backup.slots[slot - 1]!.data) }));
+  const done: number[] = [];
   writing = true;
   updateButtons();
-  showDetail(slot);
-  setStatus('busy', `Writing slot ${slot}…`);
+  redrawDetail();
+  setStatus('busy', `Writing slot ${slots[0]}…`);
   try {
-    // Only the patch's own bytes: the leftovers after it are not part of it.
-    const stored = await pedal.writeSlot(slot, patchBytes(read.data));
-    const entry = toSlotEntry(stored);
-    entries = entries.map((e) => (e.slot === slot ? entry : e));
-    lastBackup = { ...lastBackup, slots: lastBackup.slots.map((r) => (r.slot === slot ? stored : r)) };
-    slotList.querySelector(`.slot[data-slot="${slot}"]`)?.parentElement?.replaceWith(slotItem(entry));
-    setStatus('connected', `Slot ${slot} restored and checked: it holds the backup's version.`);
+    await pedal.writeSlots(writes, (stored) => {
+      storeWritten(stored);
+      done.push(stored.slot);
+      const next = slots[done.length];
+      if (next !== undefined) {
+        setStatus('busy', `Slot ${stored.slot} checked. Writing slot ${next} (${done.length + 1} of ${slots.length})…`);
+      }
+    });
+    const what = slots.length === 1 ? `Slot ${slots[0]} restored and checked` : `Slots ${slots.join(', ')} restored and checked`;
+    setStatus('connected', `${what}: the backup's version is on the pedal.`);
   } catch (error) {
-    setStatus('error', `Slot ${slot} was not restored: ${messageOf(error)}. Read the pedal again to see its state.`);
+    const written = done.length ? ` Restored and checked before it: ${done.join(', ')}.` : '';
+    const failed = slots[done.length];
+    const rest = slots.slice(done.length + 1);
+    const notSent = rest.length ? ` Not written: ${rest.join(', ')}.` : '';
+    setStatus('error', `Slot ${failed} was not restored: ${messageOf(error)}.${written}${notSent} Read the pedal again to see its state.`);
   } finally {
     writing = false;
     updateButtons();
@@ -280,8 +372,16 @@ function compare(): void {
   for (const button of slotList.querySelectorAll<HTMLElement>('.slot')) {
     markChanged(button, Number(button.dataset.slot));
   }
+  restoreManyButton.hidden = changedUserSlots().length === 0;
+  redrawDetail();
+}
+
+/** Draw the detail panel again with what it shows now (a slot or the restore panel). */
+function redrawDetail(): void {
   if (selected !== null) {
     showDetail(selected);
+  } else if (restorePanelOpen) {
+    showRestorePanel();
   }
 }
 
@@ -370,6 +470,7 @@ function slotItem(entry: SlotEntry): HTMLLIElement {
 
 function showDetail(slot: number): void {
   selected = slot;
+  restorePanelOpen = false;
   for (const button of slotList.querySelectorAll<HTMLElement>('.slot')) {
     button.setAttribute('aria-current', String(button.dataset.slot === String(slot)));
   }
@@ -441,6 +542,7 @@ refreshButton.addEventListener('click', () => void readSlots());
 backupButton.addEventListener('click', downloadBackup);
 // The button opens the browser's file picker of the hidden <input type="file">.
 compareButton.addEventListener('click', () => backupFileInput.click());
+restoreManyButton.addEventListener('click', showRestorePanel);
 backupFileInput.addEventListener('change', () => {
   const file = backupFileInput.files?.[0];
   backupFileInput.value = ''; // so picking the same file again fires 'change' again

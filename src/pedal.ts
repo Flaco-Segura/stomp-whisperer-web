@@ -1,5 +1,5 @@
 // Request/reply exchanges with the pedal, and the operations built on them: reading every
-// slot and writing one user slot. Port of stomp_whisperer/pedal.py.
+// slot and writing user slots. Port of stomp_whisperer/pedal.py.
 //
 // The MIDI connection itself comes from outside as a SysexTransport: src/webmidi.ts in
 // the browser, a fake pedal in the tests. That keeps this module free of browser APIs.
@@ -52,6 +52,28 @@ export function decodePatchReply(
   const data = protocol.unpack7to8(packed);
   const checksumOk = (protocol.decodeChecksum(reply) ^ 0xffffffff) >>> 0 === protocol.crc32(data);
   return { data, checksumOk };
+}
+
+/** A patch to store in a user slot. */
+export interface SlotWrite {
+  slot: number;
+  patch: Uint8Array;
+}
+
+/** Throw if `patch` can't go to slot `location`; return the patch's own length (PTCF header). */
+function checkUpload(location: number, info: PatchInfo, patch: Uint8Array): number {
+  if (!Number.isInteger(location) || location < FIRST_USER_SLOT || location > info.count) {
+    throw new RangeError(`Only user slots ${FIRST_USER_SLOT}–${info.count} can be written, not ${location}`);
+  }
+  if (patch.length === 0 || patch.length > info.patchSize) {
+    throw new RangeError(`A patch must be 1 to ${info.patchSize} bytes, not ${patch.length}`);
+  }
+  const isPtcf = patch.length >= 8 && String.fromCharCode(...patch.subarray(0, 4)) === 'PTCF';
+  const length = isPtcf ? new DataView(patch.buffer, patch.byteOffset, 8).getUint32(4, true) : 0;
+  if (!isPtcf || length < 8 || length > patch.length) {
+    throw new RangeError('Not a PTCF patch');
+  }
+  return length;
 }
 
 export class Pedal {
@@ -144,17 +166,7 @@ export class Pedal {
    * Call it inside PC mode (writeSlot does).
    */
   async uploadPatch(location: number, info: PatchInfo, patch: Uint8Array): Promise<SlotRead> {
-    if (!Number.isInteger(location) || location < FIRST_USER_SLOT || location > info.count) {
-      throw new RangeError(`Only user slots ${FIRST_USER_SLOT}–${info.count} can be written, not ${location}`);
-    }
-    if (patch.length === 0 || patch.length > info.patchSize) {
-      throw new RangeError(`A patch must be 1 to ${info.patchSize} bytes, not ${patch.length}`);
-    }
-    const isPtcf = patch.length >= 8 && String.fromCharCode(...patch.subarray(0, 4)) === 'PTCF';
-    const length = isPtcf ? new DataView(patch.buffer, patch.byteOffset, 8).getUint32(4, true) : 0;
-    if (!isPtcf || length < 8 || length > patch.length) {
-      throw new RangeError('Not a PTCF patch');
-    }
+    const length = checkUpload(location, info, patch);
     const data = new Uint8Array(info.patchSize);
     data.set(patch);
     await this.request(protocol.patchUpload(location, info.bankSize, data), `patch_upload(${location})`);
@@ -168,9 +180,35 @@ export class Pedal {
 
   /** Write one user slot inside PC mode and return it as read back (see uploadPatch). */
   async writeSlot(location: number, patch: Uint8Array): Promise<SlotRead> {
+    const [stored] = await this.writeSlots([{ slot: location, patch }]);
+    return stored!;
+  }
+
+  /**
+   * Write several user slots, in order, inside one PC mode session (see uploadPatch).
+   *
+   * Every write is checked before the first one is sent, so a bad entry sends nothing.
+   * It stops at the first slot that fails: the ones before it stay written, and `onSlot`
+   * has reported each of them as read back.
+   */
+  async writeSlots(writes: SlotWrite[], onSlot?: (stored: SlotRead) => void): Promise<SlotRead[]> {
+    const slots = writes.map((write) => write.slot);
+    if (new Set(slots).size !== slots.length) {
+      throw new RangeError(`A slot can only be written once per call: ${slots.join(', ')}`);
+    }
     await this.pcModeOn();
     try {
-      return await this.uploadPatch(location, await this.patchCheck(), patch);
+      const info = await this.patchCheck();
+      for (const { slot, patch } of writes) {
+        checkUpload(slot, info, patch);
+      }
+      const stored: SlotRead[] = [];
+      for (const { slot, patch } of writes) {
+        const read = await this.uploadPatch(slot, info, patch);
+        stored.push(read);
+        onSlot?.(read);
+      }
+      return stored;
     } finally {
       await this.pcModeOff();
     }
