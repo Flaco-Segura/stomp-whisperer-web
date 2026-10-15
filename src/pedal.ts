@@ -157,6 +157,16 @@ export class Pedal {
   }
 
   /**
+   * The patch on the pedal's screen, with any edits not yet stored (its edit buffer).
+   * The pedal stores those edits in the slot only when you leave the patch.
+   * Call it inside PC mode.
+   */
+  async downloadCurrentPatch(): Promise<{ data: Uint8Array; checksumOk: boolean }> {
+    const reply = await this.request(protocol.patchDownloadCurrent(), 'patch_download_current');
+    return decodePatchReply(reply, 8);
+  }
+
+  /**
    * Store PTCF `patch` bytes in user slot `location`, then read the slot back to check it.
    *
    * The slot is sent padded with zeros to its full size, as the Python app does. Only the
