@@ -4,6 +4,7 @@
 // The MIDI connection itself comes from outside as a SysexTransport: src/webmidi.ts in
 // the browser, a fake pedal in the tests. That keeps this module free of browser APIs.
 
+import { patchBytes } from './patch';
 import * as protocol from './protocol';
 import { FIRST_USER_SLOT } from './slots';
 
@@ -54,10 +55,39 @@ export function decodePatchReply(
   return { data, checksumOk };
 }
 
-/** A patch to store in a user slot. */
+/**
+ * The pedal holds something else than when it was last read, so a backup made from that
+ * read doesn't cover what a write would overwrite.
+ */
+export class SlotChangedError extends Error {
+  override name = 'SlotChangedError';
+}
+
+/** A patch to store in a user slot, and what the slot held when it was last read. */
 export interface SlotWrite {
   slot: number;
   patch: Uint8Array;
+  lastRead: Uint8Array;
+}
+
+/** Every slot as read, and the patch on the pedal's screen read in the same PC mode session. */
+export interface PedalRead {
+  slots: SlotRead[];
+  current: { data: Uint8Array; checksumOk: boolean };
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((byte, i) => byte === b[i]);
+}
+
+/**
+ * True if the patch on the pedal's screen holds edits stored in no slot: its own bytes (see
+ * patchBytes) match no slot read. The pedal doesn't say which slot is on screen, so any
+ * match counts; a damaged copy of the screen's patch counts as unsaved edits.
+ */
+export function hasUnsavedEdits({ slots, current }: PedalRead): boolean {
+  const screen = patchBytes(current.data);
+  return !current.checksumOk || !slots.some((read) => read.checksumOk && sameBytes(patchBytes(read.data), screen));
 }
 
 /** Throw if `patch` can't go to slot `location`; return the patch's own length (PTCF header). */
@@ -188,9 +218,9 @@ export class Pedal {
     return stored;
   }
 
-  /** Write one user slot inside PC mode and return it as read back (see uploadPatch). */
-  async writeSlot(location: number, patch: Uint8Array): Promise<SlotRead> {
-    const [stored] = await this.writeSlots([{ slot: location, patch }]);
+  /** Write one user slot inside PC mode and return it as read back (see writeSlots). */
+  async writeSlot(location: number, patch: Uint8Array, lastRead: Uint8Array): Promise<SlotRead> {
+    const [stored] = await this.writeSlots([{ slot: location, patch, lastRead }]);
     return stored!;
   }
 
@@ -198,6 +228,9 @@ export class Pedal {
    * Write several user slots, in order, inside one PC mode session (see uploadPatch).
    *
    * Every write is checked before the first one is sent, so a bad entry sends nothing.
+   * Then every target slot is read again: if one no longer holds `lastRead` (only the
+   * patch's own bytes count), nothing is written and SlotChangedError is thrown. Entering
+   * PC mode stores any edit pending on the pedal, so this re-read sees it too.
    * It stops at the first slot that fails: the ones before it stay written, and `onSlot`
    * has reported each of them as read back.
    */
@@ -212,6 +245,14 @@ export class Pedal {
       for (const { slot, patch } of writes) {
         checkUpload(slot, info, patch);
       }
+      for (const { slot, lastRead } of writes) {
+        const now = await this.downloadPatch(slot, info.bankSize);
+        if (!now.checksumOk || !sameBytes(patchBytes(now.data), patchBytes(lastRead))) {
+          throw new SlotChangedError(
+            `Slot ${slot} changed on the pedal since it was read: read again and download a new backup`,
+          );
+        }
+      }
       const stored: SlotRead[] = [];
       for (const { slot, patch } of writes) {
         const read = await this.uploadPatch(slot, info, patch);
@@ -224,8 +265,11 @@ export class Pedal {
     }
   }
 
-  /** Read every patch slot, in order, reporting each one as it arrives. */
-  async readAllSlots(onSlot?: (read: SlotRead, info: PatchInfo) => void): Promise<SlotRead[]> {
+  /**
+   * Read every patch slot, in order, reporting each one as it arrives; then the patch on the
+   * pedal's screen, to tell whether it has edits not stored in its slot (hasUnsavedEdits).
+   */
+  async readAllSlots(onSlot?: (read: SlotRead, info: PatchInfo) => void): Promise<PedalRead> {
     await this.pcModeOn();
     try {
       const info = await this.patchCheck();
@@ -235,7 +279,8 @@ export class Pedal {
         slots.push(read);
         onSlot?.(read, info);
       }
-      return slots;
+      const current = await this.downloadCurrentPatch();
+      return { slots, current };
     } finally {
       await this.pcModeOff();
     }

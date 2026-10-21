@@ -7,6 +7,7 @@ export class FakePedal implements SysexTransport {
   readonly sent: Uint8Array[] = [];
   silent = false; // when true, it never answers
   corruptWrites = false; // when true, an upload stores its data with one byte flipped
+  editBuffer = new Uint8Array(); // the patch on screen, edits included (patch_download_current)
   private handler: ((body: Uint8Array) => void) | null = null;
   readonly slots: Uint8Array[];
   private readonly bankSize: number;
@@ -67,6 +68,10 @@ export class FakePedal implements SysexTransport {
         }
         this.slots[slot - 1] = data;
         return Uint8Array.from([...head, 0x00]);
+      }
+      case 0x64: { // patch_download_current: header 52 00 6E 64 12 01 <len lo> <len hi>
+        const upload = protocol.patchUpload(1, this.bankSize, this.editBuffer);
+        return Uint8Array.from([...head, 0x64, 0x12, 0x01, ...upload.subarray(10)]);
       }
       default: // pc mode on/off and anything else get a bare acknowledgement
         return Uint8Array.from([...head, 0x00]);

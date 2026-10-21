@@ -10,7 +10,7 @@ import './style.css';
 import { backupFileName, backupToJson, changedSlots, createBackup, parseBackup, type Backup } from './backup';
 import { type Change, patchChanges } from './diff';
 import { displayName, patchBytes, patchDescription, type Patch } from './patch';
-import { type PatchInfo, Pedal, type SlotRead } from './pedal';
+import { type PatchInfo, Pedal, SlotChangedError, type SlotRead, hasUnsavedEdits } from './pedal';
 import { type SlotEntry, effectIdHex, isFactorySlot, toSlotEntry, usedEffects } from './slots';
 import { isPedalPort, openPedal, requestMidi } from './webmidi';
 
@@ -46,6 +46,10 @@ let reading = false;
 let writing = false;
 // Whether the user downloaded a backup since the last read: no write is allowed before.
 let backupDownloaded = false;
+// Whether the last read found edits on the pedal's screen stored in no slot: a backup
+// wouldn't hold them, so no write is allowed until the next read.
+let unsavedEdits = false;
+const UNSAVED_EDITS = "The patch on the pedal's screen has unsaved edits: switch to another patch on the pedal, then read again.";
 
 const busy = () => reading || writing;
 
@@ -119,6 +123,7 @@ async function readSlots(): Promise<void> {
   reading = true;
   // The pedal may have changed since the last backup (it saves edits by itself).
   backupDownloaded = false;
+  unsavedEdits = false;
   updateButtons();
   entries = [];
   lastBackup = null;
@@ -131,7 +136,7 @@ async function readSlots(): Promise<void> {
   try {
     // 'as': TypeScript can't see the callback assign it, and would narrow it to plain null.
     let patchInfo = null as PatchInfo | null;
-    const reads = await pedal.readAllSlots((read, info) => {
+    const read = await pedal.readAllSlots((read, info) => {
       patchInfo = info;
       const entry = toSlotEntry(read);
       entries.push(entry);
@@ -139,7 +144,13 @@ async function readSlots(): Promise<void> {
       listState.textContent = `Reading patch ${read.slot} of ${info.count}…`;
     });
     if (patchInfo) {
-      lastBackup = createBackup(patchInfo, reads);
+      lastBackup = createBackup(patchInfo, read.slots);
+    }
+    unsavedEdits = hasUnsavedEdits(read);
+    if (unsavedEdits) {
+      setStatus('error', UNSAVED_EDITS);
+    } else {
+      setStatus('connected', `Read all ${read.slots.length} slots; no unsaved edits on the pedal's screen.`);
     }
     // The pedal may have changed since the backup was loaded: compare again.
     compare();
@@ -194,6 +205,9 @@ function slotBlocker(slot: number): string | null {
 function writeBlocker(): string | null {
   if (!pedal || !lastBackup) {
     return 'Connect the pedal and read it to restore slots.';
+  }
+  if (unsavedEdits) {
+    return UNSAVED_EDITS;
   }
   if (!backupDownloaded) {
     return 'Download a backup of the pedal first: it keeps what the slots hold now.';
@@ -300,7 +314,12 @@ async function restoreSlots(slots: number[]): Promise<void> {
   }
   const backup = loadedBackup;
   // Only the patch's own bytes: the leftovers after it are not part of it.
-  const writes = slots.map((slot) => ({ slot, patch: patchBytes(backup.slots[slot - 1]!.data) }));
+  const lastRead = lastBackup!;
+  const writes = slots.map((slot) => ({
+    slot,
+    patch: patchBytes(backup.slots[slot - 1]!.data),
+    lastRead: lastRead.slots[slot - 1]!.data,
+  }));
   const done: number[] = [];
   writing = true;
   updateButtons();
@@ -318,6 +337,10 @@ async function restoreSlots(slots: number[]): Promise<void> {
     const what = slots.length === 1 ? `Slot ${slots[0]} restored and checked` : `Slots ${slots.join(', ')} restored and checked`;
     setStatus('connected', `${what}: the backup's version is on the pedal.`);
   } catch (error) {
+    if (error instanceof SlotChangedError) {
+      setStatus('error', `Nothing was written. ${messageOf(error)}.`);
+      return;
+    }
     const written = done.length ? ` Restored and checked before it: ${done.join(', ')}.` : '';
     const failed = slots[done.length];
     const rest = slots.slice(done.length + 1);
