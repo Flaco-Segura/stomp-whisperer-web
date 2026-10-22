@@ -82,6 +82,9 @@ const SPACES = new RegExp(`[${SPACE}]+`);
 const LEADING_SPACES = new RegExp(`^[${SPACE}]+`);
 const TRAILING_SPACES = new RegExp(`[${SPACE}]+$`);
 
+/** Like Python's str.strip(). */
+export const strip = (text: string) => text.replace(LEADING_SPACES, '').replace(TRAILING_SPACES, '');
+
 const words = (text: string) => text.split(SPACES).filter((word) => word !== '');
 
 /** Name with the pedal's two-line padding collapsed to single spaces. */
@@ -133,11 +136,11 @@ export function formatName(text: string): string {
 
 // A DataView reads multi-byte integers (struct.unpack in Python). It must cover exactly
 // the bytes of `data`, which may be a window (subarray) into a larger buffer.
-const viewOf = (data: Uint8Array) => new DataView(data.buffer, data.byteOffset, data.byteLength);
+export const viewOf = (data: Uint8Array) => new DataView(data.buffer, data.byteOffset, data.byteLength);
 
 // Like bytes.decode("ascii", errors="replace"). TextDecoder("ascii") would not do:
 // browsers treat that label as windows-1252.
-const decodeAscii = (bytes: Uint8Array) =>
+export const decodeAscii = (bytes: Uint8Array) =>
   Array.from(bytes, (b) => (b < 0x80 ? String.fromCharCode(b) : '�')).join('');
 
 // Like str.encode("ascii"): refuses anything outside ASCII.
@@ -226,7 +229,7 @@ function decodeEffects(edtb: Uint8Array): Effect[] {
   return effects;
 }
 
-function readChunks(data: Uint8Array, offset: number): Map<string, Uint8Array> {
+export function readChunks(data: Uint8Array, offset: number): Map<string, Uint8Array> {
   const chunks = new Map<string, Uint8Array>();
   const view = viewOf(data);
   while (offset + 8 <= data.length) {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { encodePatch } from '../src/patch';
-import { Pedal, PedalTimeoutError, PedalWriteError, SlotChangedError, decodePatchReply, hasUnsavedEdits } from '../src/pedal';
+import { Pedal, PedalFileError, PedalTimeoutError, PedalWriteError, SlotChangedError, decodePatchReply, hasUnsavedEdits } from '../src/pedal';
 import * as protocol from '../src/protocol';
 import { FakePedal } from './fake-pedal';
 import { hasGolden, loadManifest, loadPatch, toHex } from './golden';
@@ -241,5 +241,31 @@ describe.skipIf(!hasGolden)('Pedal against golden files', () => {
     const { slots: reads } = await new Pedal(new FakePedal(raws)).readAllSlots();
     expect(reads.map((r) => toHex(r.data))).toEqual(raws.map(toHex));
     expect(reads.every((r) => r.checksumOk)).toBe(true);
+  });
+});
+
+describe('Pedal file reads', () => {
+  const content = Uint8Array.from({ length: 40 }, (_, i) => (i * 37) & 0xff); // 3 blocks of 16
+
+  it('lists the files in the pedal storage', async () => {
+    const fake = new FakePedal([]);
+    fake.files.set('FLST_SEQ.ZT2', content);
+    fake.files.set('COMP.ZD2', content);
+    expect(await new Pedal(fake).listFiles()).toEqual(['FLST_SEQ.ZT2', 'COMP.ZD2']);
+  });
+
+  it('downloads a file block by block and closes it', async () => {
+    const fake = new FakePedal([]);
+    fake.files.set('COMP.ZD2', content);
+    expect(await new Pedal(fake).downloadFile('COMP.ZD2')).toEqual(content);
+    expect(fake.sent.slice(-2)).toEqual(protocol.fileClose());
+  });
+
+  it('rejects a block with a bad checksum, still closing the file', async () => {
+    const fake = new FakePedal([]);
+    fake.files.set('COMP.ZD2', content);
+    fake.corruptFileBlocks = true;
+    await expect(new Pedal(fake).downloadFile('COMP.ZD2')).rejects.toThrow(PedalFileError);
+    expect(fake.sent.slice(-2)).toEqual(protocol.fileClose());
   });
 });

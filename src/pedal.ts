@@ -4,7 +4,7 @@
 // The MIDI connection itself comes from outside as a SysexTransport: src/webmidi.ts in
 // the browser, a fake pedal in the tests. That keeps this module free of browser APIs.
 
-import { patchBytes } from './patch';
+import { decodeAscii, patchBytes } from './patch';
 import * as protocol from './protocol';
 import { FIRST_USER_SLOT } from './slots';
 
@@ -18,6 +18,11 @@ export interface SysexTransport {
 
 export class PedalTimeoutError extends Error {
   override name = 'PedalTimeoutError';
+}
+
+/** Thrown when a file read from the pedal arrives damaged. */
+export class PedalFileError extends Error {
+  override name = 'PedalFileError';
 }
 
 /** The pedal didn't store what was written: the slot read back holds something else. */
@@ -194,6 +199,53 @@ export class Pedal {
   async downloadCurrentPatch(): Promise<{ data: Uint8Array; checksumOk: boolean }> {
     const reply = await this.request(protocol.patchDownloadCurrent(), 'patch_download_current');
     return decodePatchReply(reply, 8);
+  }
+
+  /** Names of the files in the pedal's storage (effects, icons, IRs, indexes). Read only. */
+  async listFiles(pattern = '*'): Promise<string[]> {
+    const names: string[] = [];
+    let reply = await this.request(protocol.fileFindFirst(pattern), 'file_find_first');
+    while (reply[4] === 0x04) { // 0x04 = a file matched
+      const raw = reply.subarray(14, 26);
+      const end = raw.indexOf(0);
+      names.push(decodeAscii(end < 0 ? raw : raw.subarray(0, end)));
+      reply = await this.request(protocol.fileFindNext(pattern), 'file_find_next');
+    }
+    await this.exchange(protocol.fileFindEnd());
+    return names;
+  }
+
+  /** Read a whole file from the pedal's storage, verifying each block's CRC32. Read only. */
+  async downloadFile(name: string): Promise<Uint8Array> {
+    await this.request(protocol.fileOpenRead(name), `file_open_read(${name})`);
+    const blocks: Uint8Array[] = [];
+    try {
+      for (;;) {
+        await this.request(protocol.fileSync(), 'file_sync');
+        await this.request(protocol.fileReadBlock(), 'file_read_block');
+        const reply = await this.request(protocol.fileSync(), 'file_sync');
+        const length = reply[9]! * 128 + reply[8]!;
+        if (reply[4] !== 0x04 || length === 0) {
+          break;
+        }
+        const block = protocol.unpack7to8(reply.subarray(10, 10 + length + Math.floor(length / 7) + 1));
+        if ((protocol.decodeChecksum(reply) ^ 0xffffffff) >>> 0 !== protocol.crc32(block)) {
+          throw new PedalFileError(`Checksum mismatch while reading ${name}`);
+        }
+        blocks.push(block);
+      }
+    } finally {
+      for (const body of protocol.fileClose()) {
+        await this.exchange(body);
+      }
+    }
+    const data = new Uint8Array(blocks.reduce((sum, block) => sum + block.length, 0));
+    let offset = 0;
+    for (const block of blocks) {
+      data.set(block, offset);
+      offset += block.length;
+    }
+    return data;
   }
 
   /**
